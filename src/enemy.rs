@@ -32,7 +32,6 @@ impl Enemy {
     pub fn draw_dead(&mut self, ctx: &mut Context, canvas: &mut Canvas) {
         let mut mesh_builder = MeshBuilder::new();
         let orgin = (0.0 as f32, 0.0 as f32);
-        let three: f32 = 3.;
         let half_size = self.size / 2.;
         mesh_builder
             .polygon(
@@ -51,7 +50,6 @@ impl Enemy {
             x: self.position.0 as f32,
             y: self.position.1 as f32,
         };
-        let top_part = (three / three.sqrt()) * self.size as f32;
         canvas.draw(
             &mesh,
             DrawParam::default()
@@ -72,7 +70,6 @@ impl Enemy {
     pub fn draw_and_reach_base_check(&mut self, ctx: &mut Context, canvas: &mut Canvas) -> bool {
         let mut current_rotation: f32 = 0.;
         let mut mesh_builder = MeshBuilder::new();
-        let three: f32 = 3.;
         let current_time = ctx.time.time_since_start().as_secs_f32();
         let time_dif = current_time - self.time_since_path_built;
         let path_index: usize = (time_dif * self.speed as f32) as usize;

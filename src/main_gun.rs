@@ -9,6 +9,7 @@ use nalgebra::base::Vector2;
 use nalgebra::geometry::Rotation2;
 use nalgebra::{center, Rotation};
 use std::default;
+use std::ops::Add;
 use std::time::Duration;
 
 use crate::enemy;
@@ -23,6 +24,7 @@ struct ExplosionInfo {
     x: f32,
     y: f32,
     started_time: f32,
+    added_to_shake_meter: bool,
 }
 #[derive(Default)]
 pub struct MainGun {
@@ -31,7 +33,7 @@ pub struct MainGun {
     pub(crate) damage: f32,
     pub(crate) explosion_info_list: Vec<ExplosionInfo>,
     pub(crate) fired_count: u32,
-    pub(crate) last_fired: f32, // TODO: store the time the gun was last fired
+    pub(crate) last_fired: f32,
     pub(crate) since_fired: f32,
     pub(crate) shooting_duration: f32,
     pub(crate) current_rotation: f32,
@@ -186,7 +188,7 @@ impl MainGun {
         }
         return barrels;
     }
-    fn draw_explosions(&mut self, canvas: &mut Canvas, ctx: &mut Context) {
+    fn draw_explosions(&mut self, canvas: &mut Canvas, ctx: &mut Context, shake_meter: &mut u8) {
         if self.explosion_info_list.len() != 0 {
             if self.explosion_info_list.len() != 0 {
                 let current_time = ctx.time.time_since_start().as_secs_f32();
@@ -196,11 +198,8 @@ impl MainGun {
                 let third_animation_length = 2.;
                 let mut deleted = false;
                 let mut explosion = MeshBuilder::new();
-                while true {
-                    let cur_explosion = self
-                        .explosion_info_list
-                        .get(current_explosion_index)
-                        .unwrap();
+                loop {
+                    let cur_explosion = &mut self.explosion_info_list[current_explosion_index];
                     let time_since_explosion = current_time - cur_explosion.started_time;
                     if time_since_explosion < first_animation_length {
                         let percentage_through = time_since_explosion / first_animation_length;
@@ -217,6 +216,14 @@ impl MainGun {
                     } else if time_since_explosion
                         < first_animation_length + second_animation_length
                     {
+                        if !cur_explosion.added_to_shake_meter {
+                            if shake_meter.add(20) < 100 as u8 {
+                                *shake_meter = shake_meter.add(20);
+                            } else if *shake_meter < 100 as u8 {
+                                *shake_meter = 100 as u8;
+                            }
+                            cur_explosion.added_to_shake_meter = true;
+                        }
                         let percentage_through = (time_since_explosion - first_animation_length)
                             / second_animation_length;
                         //create red and shrink yellow
@@ -339,8 +346,9 @@ impl MainGun {
         ctx: &mut Context,
         canvas: &mut Canvas,
         enemy_alive_list: &mut Vec<enemy::Enemy>,
+        shake_meter: &mut u8,
     ) {
-        self.draw_explosions(canvas, ctx);
+        self.draw_explosions(canvas, ctx, shake_meter);
         let time_since_start_as_sec = ctx.time.time_since_start().as_secs_f32();
         self.since_fired = time_since_start_as_sec - self.last_fired;
         let mut mesh_builder = MeshBuilder::new();
@@ -536,6 +544,7 @@ impl MainGun {
                 x: center_of_explosion.x,
                 y: center_of_explosion.y,
                 started_time: current_time,
+                added_to_shake_meter: false,
             });
             //collision check
             //first check if a box would have hit
