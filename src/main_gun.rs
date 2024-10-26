@@ -43,10 +43,6 @@ pub struct MainGun {
 }
 impl MainGun {
     fn get_barrel_segment_positions(&self) -> Vec<Rect> {
-        // TODO
-        //
-        // gun is in a fire animation
-        //
         let initial_animation_length = 0.15 * self.shooting_duration;
         let return_animation_length = 0.85 * self.shooting_duration;
 
@@ -403,7 +399,6 @@ impl MainGun {
             )
             .unwrap();
         // MAIN GOAL: figure out the positions of each of the barrel segments and draw them
-        // TODO: add to mesh builder
         let mesh_data = mesh_builder.build();
         let mesh = Mesh::from_data(&ctx.gfx, mesh_data);
         self.move_and_check_fire(ctx.time.time_since_start(), enemy_alive_list);

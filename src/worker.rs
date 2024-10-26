@@ -6,7 +6,7 @@ use ggez::{
 #[derive(Clone)]
 pub struct Task {
     pub(crate) task_times: Vec<f32>,
-    pub(crate) goals: Vec<(i32, i32)>,
+    pub(crate) goals: Vec<(f32, f32)>,
 }
 #[derive(Clone)]
 pub struct Worker {

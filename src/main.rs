@@ -7,15 +7,20 @@ use ggez::input::keyboard::{self, KeyInput};
 use ggez::winit::event::VirtualKeyCode;
 use ggez::{conf, Context, ContextBuilder, GameError, GameResult};
 use libm::atan2f;
+use num::cast::AsPrimitive;
+use pathfinding::matrix::directions;
 use pathfinding::prelude::astar;
 use rand::Rng;
 const DEFAULT_CAM_SIZE: f32 = 100.0;
+use std::any::Any;
 use std::default;
 use std::f32::consts::PI;
 use std::ops::{Div, Mul};
 mod enemy;
 mod main_gun;
 mod worker;
+use std::collections::{HashMap, VecDeque};
+const DIRECTIONS:[(i32,i32);4] = [(0,1),(-1,0),(1,0),(0,-1)];
 fn main() {
     // Make a Context.
     let mut cf = conf::Conf::new();
@@ -31,43 +36,165 @@ fn main() {
     // Run!
     event::run(ctx, event_loop, my_game);
 }
+#[derive(Clone,Copy)]
+enum BuildingType{
+    Sentry,
+    Baricade,
+}
+#[derive(Clone)]
+enum Direction{
+    TOP,
+    LEFT,
+    RIGHT,
+    BOTTOM
+}
+impl Direction {
+    fn new(index:usize) -> Self{
+        match index{
+            0=> Direction::TOP,
+            1=> Direction::LEFT,
+            2=> Direction::RIGHT,
+            3=> Direction::BOTTOM,
+            _=> panic!("Used an index outside of possible Directions")
+        }
+    }
+}
+#[derive(Clone)]
+struct BuildingGridInfo{
+    id: u32,
+    typ: BuildingType,
+}
+///Will either be used to direct enemies or assign damage if an enemy attacks it
+#[derive(Clone)]
+struct GridSpace{
+    building: Option<BuildingGridInfo>,
+    direction: Option<Direction>
+}
 #[derive(Clone)]
 struct Map {
-    sentries: Vec<(i32, i32)>,
-    barriers: Vec<(i32, i32)>,
+    map: Vec<Vec<GridSpace>>,
 }
+///Grid system for placing objects and pathing enemies
 impl Map {
-    pub fn find_moveable_options(self, x: i32, y: i32) -> Vec<(i32, i32)> {
-        let mut movement_options: Vec<(i32, i32)> = vec![
-            (x + 1, y + 1),
-            (x + 1, y),
-            (x + 1, y - 1),
-            (x, y + 1),
-            (x, y - 1),
-            (x - 1, y + 1),
-            (x - 1, y),
-            (x - 1, y - 1),
-        ];
-        let mut index = movement_options.len() - 1;
-        //this the number it gets assigned when it runs out of bounds
-        loop {
-            let current_cord = movement_options.get(index).unwrap();
-            if current_cord.0 > 500
-                || current_cord.1 > 500
-                || current_cord.0 < -500
-                || current_cord.1 < -500
-            {
-                movement_options.remove(index);
-            } else if self.sentries.contains(current_cord) || self.barriers.contains(current_cord) {
-                movement_options.remove(index);
+    fn new(building_hash_map: &HashMap<u32,Building>) -> Self{
+        let empty_grid_space: GridSpace  = GridSpace { building:None,direction:None };
+         let mut default_map = vec![vec![empty_grid_space;251];251];
+         //add any existing buildings before initial map build
+         for (current_building_id, building) in building_hash_map{
+            for y in building.bottom_left.1..building.bottom_left.1-building.height{
+                for x in building.bottom_left.0..building.bottom_left.0+building.width{
+                    default_map[x][y].building = Some(BuildingGridInfo {id: *current_building_id, typ: building.building_type })
+                }
             }
-            if index == 0 {
-                break;
-            }
-            index -= 1;
-        }
-        movement_options
+         }
+         Map{ map: default_map}
     }
+    //TODO: add checks for if building is being built inside another building
+    pub fn add_building(&mut self, building_id:u32, building:Building){
+        for y in building.bottom_left.1..building.bottom_left.1-building.height{
+            for x in building.bottom_left.0..building.bottom_left.0+building.width{
+                self.map[x][y].building = Some(BuildingGridInfo {id: building_id, typ: building.building_type })
+            }
+        }
+    }
+    ///used to convert -500.0 to 500.0 to the grid system of 0 to 250 lossfully
+    pub fn convert_position_to_grid_position(position:(f32,f32)) -> (usize,usize){
+        let new_position:(f32,f32)= (((position.0+500.)/4.), ((position.1+500.)/4.));
+        let output:(usize,usize)= (new_position.0.as_(), new_position.1.as_());
+        println!("converted ({},{}) to ({},{}) to ({},{})",position.0,position.1,new_position.0,new_position.1,output.0,output.1);
+        return output;
+    }
+    //Path system built into the grid system that priorizies nearest objective
+    pub fn build_flow_path(&mut self, building_hash_map:&HashMap<u32,Building>){
+        // do a level pathing off off each building position
+        // steps:
+        // build a double sidded queue
+        println!("Path being built");
+        let mut spread_queue:VecDeque<(usize,usize)> = VecDeque::new();
+        // TODO: double check this beecause all of the paths seems to only have to points of orgins and also add it so there is a direction on this
+        // feed the queue all outside layers of buildings, x lines take priority over corners to avoid wasted time with duplication
+        for (_, building) in building_hash_map{
+            // |__
+            for y in building.bottom_left.1-1..building.bottom_left.1-building.height+1{
+                spread_queue.push_back((building.bottom_left.0,y));
+            }
+            for x in building.bottom_left.0..building.bottom_left.0+building.width{
+                spread_queue.push_back((x,building.bottom_left.1));
+            }
+            //  __
+            //    |
+            for y in building.bottom_left.1-1..building.bottom_left.1-building.height+1{
+                spread_queue.push_back((building.bottom_left.0+building.width,y));
+            }
+            for x in building.bottom_left.0..building.bottom_left.0+building.width{
+                spread_queue.push_back((x,building.bottom_left.1-building.height));
+            }
+        }
+        // now MAKE IT SPREAD
+        while !spread_queue.is_empty(){
+            // pop the current space
+            let current_location = spread_queue.pop_front().unwrap();
+            // give all surrounding gridspaces that do not have (directions and building) directions to the current space
+            for (index, direction) in DIRECTIONS.iter().enumerate(){
+                //direction is off the grid
+                if (direction.0 + current_location.0 as i32)<0 || (direction.0 + current_location.0 as i32) >250{
+                    println!("fail 1");
+                    continue;
+                } 
+                
+                if (direction.1 + current_location.1 as i32) < 0 || (direction.1 + current_location.1 as i32) > 250{
+                    println!("fail 2");
+                    continue;
+                }
+                
+                let current_surrounding_space_cord:(usize,usize)  = 
+                    (usize::try_from(current_location.0 as i32+direction.0).unwrap(),usize::try_from(current_location.1 as i32+direction.1).unwrap());
+                let current_surrounding_space:&mut GridSpace = 
+                    &mut self.map[ current_surrounding_space_cord.0][current_surrounding_space_cord.1];
+                if current_surrounding_space.building.is_none() && current_surrounding_space.direction.is_none(){
+                    current_surrounding_space.direction = Some(Direction::new(index));
+                    spread_queue.push_back(current_surrounding_space_cord);
+                    println!("direction added")
+                }
+            }  
+            //OR just feed the direction like i already set up to the directions that dont have a building and directions
+        
+        }
+        // add the new spaces to the queue
+        println!("Path finished being built");
+    }
+    // pub fn find_moveable_options(&self, x: i32, y: i32) -> Vec<(((i32, i32) u32))> {
+    //     let movement_ammount = 5;
+    //     let mut movement_options: Vec<((i32, i32),u32)> = vec![
+    //         ((x + movement_ammount, y + movement_ammount),0),
+    //         ((x + movement_ammount, y),0),
+    //         ((x + movement_ammount, y - movement_ammount),0),
+    //         ((x, y + movement_ammount),0),
+    //         ((x, y - movement_ammount),0),
+    //         ((x - movement_ammount, y + movement_ammount),0),
+    //         ((x - movement_ammount, y),0),
+    //         ((x - movement_ammount, y - movement_ammount),0),
+    //     ];
+    //     let mut index = 7;
+    //     loop {
+    //         let current_cord = movement_options[index].0;
+    //         if current_cord.0 > 500
+    //             || current_cord.1 > 500
+    //             || current_cord.0 < -500
+    //             || current_cord.1 < -500
+    //         {
+    //             // out of grid
+    //         } else if self.map[(current_cord.0 + 500) as usize][(current_cord.1 + 500) as usize].is_some() {
+    //             //need to it to alter the movement cost (+ for senteries, - for )
+    //             movement_options.remove(index);
+    //         }
+    //         if index == 0 {
+    //             break;
+    //         }
+    //         index -= 1;
+    //     }
+    //     movement_options
+    // }
 }
 enum State {
     StartMenu,
@@ -79,11 +206,21 @@ struct MyGame {
     state: State,
     current_game: Game,
 }
+//TODO: ADD more details to add variance for other buildings besides barriers
+struct Building{
+    building_type: BuildingType,
+    bottom_left: (usize,usize),
+    width: usize,
+    height: usize,
+    max_health: f32,
+    health: f32
+}
 struct Game {
     main_gun: main_gun::MainGun,
     map: Map,
-    player_max_health: f32,
-    player_current_health: f32,
+    path_built:bool,
+    last_building_added_id: u32,
+    building_hash_map: HashMap<u32,Building>,
     enemy_alive_list: Vec<enemy::Enemy>,
     enemy_dead_list: Vec<enemy::Enemy>,
     worker_task_list: Vec<worker::Task>,
@@ -96,11 +233,22 @@ struct Game {
 }
 impl Default for Game {
     fn default() -> Self {
+        //The health for the player/ main building/ main gun
+            // width = 18
+            // height =  12
+            // bottom left x = 116
+            // bottom left y = 119
+        let mut building_hash_map:HashMap<u32,Building>= HashMap::new();
+        let main_building = Building{ bottom_left: (134,131), width: 18, height: 12, max_health: 1000., health: 1000.,building_type:BuildingType::Sentry };
+        building_hash_map.insert(0, main_building);
         Game {
-            player_max_health: 1000.,
-            player_current_health: 1000.,
+
             worker_list: Vec::new(),
             worker_task_list: Vec::new(),
+            last_building_added_id: 0,
+            map: Map::new(&building_hash_map),
+            path_built: false,
+            building_hash_map,
             main_gun: main_gun::MainGun {
                 shooting_duration: 2.,
                 enabled: true,
@@ -108,10 +256,6 @@ impl Default for Game {
                 shell_explosive_radius: 50.,
                 damage: 100.,
                 ..Default::default()
-            },
-            map: Map {
-                sentries: Vec::new(),
-                barriers: Vec::new(),
             },
             enemy_alive_list: Vec::new(),
             enemy_dead_list: Vec::new(),
@@ -123,6 +267,21 @@ impl Default for Game {
         }
     }
 }
+///position used for defining a place for pathing
+struct Pos {
+    bottom_left: (i32,i32),
+    scale: (i32,i32),
+    center: (i32,i32)
+}
+impl Pos{
+    fn new(bottom_left: (i32, i32),scale: (i32,i32)) -> Self{
+        Pos{ bottom_left, scale, center: (bottom_left.0 + (scale.0/2),bottom_left.1 + (scale.1/2)) }
+    }
+    fn distance_to_center (&self, given_point:(i32,i32)) -> u32{
+        self.center.0.abs_diff(given_point.0) + self.center.1.abs_diff(given_point.1)
+    }
+}
+
 impl MyGame {
     pub fn new(_ctx: &mut Context) -> MyGame {
         MyGame {
@@ -135,68 +294,71 @@ impl MyGame {
         self.state = State::StartMenu;
         self.current_game = Default::default();
     }
-    fn spawn_enemy(&mut self, ctx: &Context) -> Result<(), GameError> {
+    fn add_building(){
+        //TODO: ensure buildings dont overlap, use the id based on the last id in the game object +1
+    }
+    fn spawn_enemy(&mut self) -> Result<(), GameError> {
         let random_ratio: f32 = rand::thread_rng().gen_range(0.0..1.);
         let base_health: f32 = 100. * (random_ratio + 0.5);
         let base_size = 20. * (random_ratio + 0.5);
         let random_side: i8 = rand::thread_rng().gen_range(1..5);
-        let current_time = ctx.time.time_since_start().as_secs_f32();
-        let mut random_side_length = (500. * random_ratio) as i32;
+        let mut random_side_length = 500. * random_ratio;
         if rand::random() {
-            random_side_length = random_side_length * -1;
+            random_side_length = random_side_length * -1.;
         }
         println!("current side: {}", random_side);
-        let position_generated: (i32, i32) = match random_side {
-            1 => (-500, random_side_length),
-            2 => (500, random_side_length),
-            3 => (random_side_length, -500),
-            4 => (random_side_length, 500),
+        let position_generated: (f32, f32) = match random_side {
+            1 => (-500., random_side_length),
+            2 => (500., random_side_length),
+            3 => (random_side_length, -500.),
+            4 => (random_side_length, 500.),
             _ => {
                 panic!()
             }
         };
         println!(
-            "Enemy Spawned at {},{} with size {} with alread {} enemies",
+            "Enemy Spawned at {},{} with size {} with already {} enemies",
             &position_generated.0,
             &position_generated.1,
             &base_size,
             self.current_game.enemy_alive_list.len()
         );
-        let mut new_enemy = Enemy {
+        let new_enemy = Enemy {
             health: base_health,
             size: base_size,
             position: position_generated,
-            path: Vec::new(),
             speed: 15,
-            last_rotation: 0.0,
-            time_since_path_built: current_time,
+            rotation: 0.0,
+            building_hit: None,
         };
-        println!("Path building started");
-        new_enemy.path = self.build_path(position_generated, (0, 0)).unwrap().0;
-        println!("Path building finished");
+        //Path has been moved onto the grid spaces
+        //println!("Path building started");
+        //new_enemy.path = self.build_path(position_generated, (0, 0)).unwrap().0;
+        //println!("Path building finished");
         self.current_game.enemy_alive_list.push(new_enemy);
         Ok(())
     }
-    fn build_path(
-        &self,
-        start_location: (i32, i32),
-        goal: (i32, i32),
-    ) -> Option<(Vec<(i32, i32)>, u32)> {
-        let result: Option<(Vec<(i32, i32)>, u32)> = astar(
-            &start_location,
-            |&(x, y)| {
-                self.current_game
-                    .map
-                    .clone()
-                    .find_moveable_options(x, y)
-                    .into_iter()
-                    .map(|p| (p, 1))
-            },
-            |&(x, y)| (goal.0.abs_diff(x) + goal.1.abs_diff(y)) / 3,
-            |&p| p == goal,
-        );
-        result
-    }
+    //TODO optimize to the grid and not pizels so that workers can use this to reach dead bodies
+    // fn build_path(
+    //     &self,
+    //     start_location: (i32, i32),
+    //     goal_bottom_left: (i32, i32),
+    //     goal_scale: (i32, i32)
+    // ) -> Option<(Vec<(i32, i32)>, u32)> {
+    //     let goal_limit = (goal_bottom_left.0 + goal_scale.0, goal_bottom_left.1 + goal_scale.1);
+    //     let distance_x = 
+    //     let result: Option<(Vec<(i32, i32)>, u32)> = astar(
+    //         &start_location,
+    //         |&(x, y)| {
+    //             self.current_game
+    //                 .map
+    //                 .find_moveable_options(x, y)
+    //         },
+    //         |&(x, y)| (goal.0.abs_diff(x) + goal.1.abs_diff(y)) / 3,
+    //         |&(x,y)| x > ,
+    //     );
+    //     result
+    // }
     fn offset_to_screen_cord(&self, ctx: &Context, screen_cord_wanted: &[f32; 2]) -> [f32; 2] {
         let window = ctx.gfx.window();
         let window_size = window.inner_size();
@@ -247,7 +409,7 @@ impl MyGame {
         println!("Converted {:?} to {:?}", screen_cord, world_coord);
         world_coord
     }
-    fn switch_setting(&mut self) -> Result<(), GameError> {
+    fn switch_perspective(&mut self) -> Result<(), GameError> {
         self.current_game.rooftop_view = !self.current_game.rooftop_view;
         self.current_game.main_gun.enabled = self.current_game.rooftop_view;
         Ok(())
@@ -299,13 +461,10 @@ impl MyGame {
                     self.current_game
                         .enemy_alive_list
                         .remove(current_enemy_index);
-                } else if current_enemy.draw_and_reach_base_check(ctx, canvas) {
+                } else if current_enemy.draw_and_reach_base_check(ctx, canvas, &self.current_game.map) {
                     //despawn the ones that reached the base and apply dmg
-                    self.current_game.player_current_health -= self
-                        .current_game
-                        .enemy_alive_list
-                        .get(current_enemy_index)
-                        .unwrap()
+                    //TODO: Despawn if reached any buildings as well
+                    self.current_game.building_hash_map.get_mut(&current_enemy.building_hit.unwrap()).unwrap().health -= current_enemy
                         .health;
                     self.current_game
                         .enemy_alive_list
@@ -329,8 +488,8 @@ impl MyGame {
         //build health text
         let health_text_format = format!(
             "{} / {}",
-            self.current_game.player_current_health as i32,
-            self.current_game.player_max_health as i32
+            self.current_game.building_hash_map.get(&0).unwrap().health as i32,
+            self.current_game.building_hash_map.get(&0).unwrap().max_health as i32
         );
         let mut health_text_fragment = TextFragment::new(health_text_format);
         health_text_fragment.color = Some(Color::WHITE);
@@ -345,7 +504,7 @@ impl MyGame {
             7. * self.current_game.camera_zoom_ratio,
         ];
         let percent_health =
-            self.current_game.player_current_health / self.current_game.player_max_health;
+        self.current_game.building_hash_map.get(&0).unwrap().health / self.current_game.building_hash_map.get(&0).unwrap().max_health;
         canvas.draw(
             &ggez::graphics::Quad,
             DrawParam::default()
@@ -396,13 +555,15 @@ impl MyGame {
                             current_worker.time_since_path_started =
                                 ctx.time.time_since_start().as_secs_f32();
                             let start_location: (i32, i32) = current_worker.position;
-                            let goal_location: (i32, i32) =
-                                self.current_game.worker_task_list[0].goals[0];
+                            let goal_location: (f32, f32) = self.current_game.worker_task_list[0].goals[0];
                             current_worker.avalible_for_task = false;
-                            let path = self.build_path(start_location, goal_location).unwrap().0;
+                            
+                            //TODO: reimplement ASTAR in worker
+                            //Will have to optimize path builder so that a worker will be able to reach the dead bodies against the flow path system
+                            //let path = self.build_path(start_location, goal_location).unwrap().0;
                             let current_worker =
                                 &mut self.current_game.worker_list[current_worker_index];
-                            current_worker.path = path;
+                            //current_worker.path = path;
                             self.current_game.worker_task_list.remove(0);
                         }
                     } else if current_worker.ready_for_new_path {
@@ -430,7 +591,7 @@ impl MyGame {
                     // a dead enemy was clicked
                     let time_to_collect_body: f32 = 0.5;
                     let time_to_deposit_body: f32 = 0.5;
-                    let home_cord: (i32, i32) = (0, 0);
+                    let home_cord: (f32, f32) = (0., 0.);
                     let collect_dead_task = worker::Task {
                         task_times: vec![time_to_collect_body, time_to_deposit_body],
                         goals: vec![bad_guy.position, home_cord],
@@ -562,8 +723,12 @@ impl MyGame {
         canvas.finish(ctx)
     }
     fn draw_playing(&mut self, ctx: &mut Context) -> GameResult {
-        if self.current_game.player_current_health < 0. {
+        if self.current_game.building_hash_map.get(&0).unwrap().health < 0. {
             self.state = State::EndMenu;
+        }
+        if !self.current_game.path_built{
+            self.current_game.map.build_flow_path(&self.current_game.building_hash_map);
+            self.current_game.path_built = true;
         }
         let mut canvas = graphics::Canvas::from_frame(ctx, Color::WHITE);
         let window = ctx.gfx.window();
@@ -606,12 +771,18 @@ impl MyGame {
         } else {
             // draw ground scene
             //the floor
+            //TODO: make this turrent location more readily converted to grid
+            //converted by doing (x+500)/4 or if specifying distance x/4
+            // width = 18
+            // height =  12
+            // bottom left x = 116
+            // bottom left y = 119
             canvas.draw(
                 &ggez::graphics::Quad,
                 DrawParam::default()
                     .color(Color::from_rgb(128, 128, 128))
-                    .scale([70., 50.])
-                    .dest([-35., -25.]),
+                    .scale([72., 48.])
+                    .dest([-36., -24.]),
             );
             canvas.draw(
                 &ggez::graphics::Quad,
@@ -629,8 +800,8 @@ impl MyGame {
 }
 
 impl EventHandler for MyGame {
-    fn update(&mut self, ctx: &mut Context) -> GameResult {
-        // Update code here...
+    fn update(&mut self, _ctx: &mut Context) -> GameResult {
+        // put logic in the drawing function, will change in future need be
         Ok(())
     }
     fn mouse_button_down_event(
@@ -673,20 +844,20 @@ impl EventHandler for MyGame {
     }
     fn key_down_event(
         &mut self,
-        ctx: &mut Context,
+        _ctx: &mut Context,
         input: ggez::input::keyboard::KeyInput,
         _repeated: bool,
     ) -> Result<(), ggez::GameError> {
         if matches!(self.state, State::Playing) {
             match input.keycode {
-                Some(VirtualKeyCode::Tab) => self.switch_setting(),
+                Some(VirtualKeyCode::Tab) => self.switch_perspective(),
                 Some(VirtualKeyCode::Q) => self.change_camera_zoom(false),
                 Some(VirtualKeyCode::E) => self.change_camera_zoom(true),
                 Some(VirtualKeyCode::W) => self.change_camera_location('w'),
                 Some(VirtualKeyCode::A) => self.change_camera_location('a'),
                 Some(VirtualKeyCode::S) => self.change_camera_location('s'),
                 Some(VirtualKeyCode::D) => self.change_camera_location('d'),
-                Some(VirtualKeyCode::Z) => self.spawn_enemy(ctx),
+                Some(VirtualKeyCode::Z) => self.spawn_enemy(),
                 _ => Ok(()),
             }
         } else {
